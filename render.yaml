@@ -1,20 +1,16 @@
 services:
   - type: web
-    name: spxacademy-api
+    name: spx-academy-api
     env: python
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
-    healthCheckPath: /health
 
-  - type: web
+  - type: static_site
     name: spxacademy
-    env: static
     rootDir: frontend
-    buildCommand: npm install && npm run build
+    buildCommand: corepack enable && corepack prepare pnpm@9.12.3 --activate && pnpm install --no-frozen-lockfile && pnpm run build
     staticPublishPath: dist
     envVars:
       - key: NODE_VERSION
         value: 20.19.5
-      - key: VITE_API_BASE_URL
-        value: https://spxacademy-api.onrender.com
