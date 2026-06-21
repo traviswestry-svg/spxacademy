@@ -1,8 +1,27 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { createRoot } from 'react-dom/client';
-import './style.css';
+import { createChart } from 'lightweight-charts';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+const DEFAULT_REMOTE_API = 'https://trading-learning-api.onrender.com';
+const API_CANDIDATES = Array.from(new Set([
+  import.meta.env.VITE_API_BASE_URL,
+  window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'http://localhost:5000'
+    : DEFAULT_REMOTE_API,
+].filter(Boolean)));
+
+async function apiFetch(path, options = {}) {
+  let lastError = null;
+  for (const base of API_CANDIDATES) {
+    try {
+      const res = await fetch(`${base}${path}`, options);
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return await res.json();
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error('Academy API unavailable');
+}
 
 function fmt(n) {
   if (n === undefined || n === null || Number.isNaN(Number(n))) return '—';
@@ -11,7 +30,7 @@ function fmt(n) {
 function chartTime(iso) { return Math.floor(new Date(iso).getTime() / 1000); }
 function clock(iso) { return iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'; }
 
-function App() {
+export default function App() {
   const chartEl = useRef(null);
   const chartRef = useRef(null);
   const candleSeries = useRef(null);
@@ -34,6 +53,7 @@ function App() {
   const [scenarios, setScenarios] = useState({});
   const [journal, setJournal] = useState(() => JSON.parse(localStorage.getItem('spxAcademyJournal') || '[]'));
   const [chartReady, setChartReady] = useState(false);
+  const [apiError, setApiError] = useState(null);
 
   const current = bars[idx];
   const visible = useMemo(() => bars.slice(0, idx + 1), [bars, idx]);
@@ -48,64 +68,77 @@ function App() {
 
   async function loadLessons() {
     try {
-      const res = await fetch(`${API_BASE}/api/trainer/lessons`);
-      const data = await res.json();
+      const data = await apiFetch('/api/trainer/lessons');
       setLessons(data.lessons || []);
       setScenarios(data.scenarios || {});
-    } catch (e) {}
+      setApiError(null);
+    } catch (e) {
+      setApiError(`Academy API not reachable. Checked: ${API_CANDIDATES.join(', ')}`);
+    }
   }
 
   async function loadSession(nextScenario = scenario) {
     setLoading(true); setPlaying(false); setTrade(null); setScore(null); setCoach(null); setIdx(45);
-    const res = await fetch(`${API_BASE}/api/trainer/session?scenario=${nextScenario}`);
-    const data = await res.json();
-    setBars(data.bars || []);
-    setContext(data.context || null);
-    setLoading(false);
+    try {
+      const data = await apiFetch(`/api/trainer/session?scenario=${nextScenario}`);
+      setBars(data.bars || []);
+      setContext(data.context || null);
+      setApiError(null);
+    } catch (e) {
+      setBars([]);
+      setContext(null);
+      setApiError(`Chart data could not load. Checked: ${API_CANDIDATES.join(', ')}`);
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => { loadLessons(); loadSession('news'); }, []);
 
   useEffect(() => {
     if (!chartEl.current || chartRef.current) return;
-    let cancelled = false;
-    let retryId = null;
     let removeResizeListener = () => {};
 
-    function init() {
-      if (cancelled) return;
-      if (!window.LightweightCharts) {
-        // The charting library loads from an external CDN script tag and may
-        // not be ready the instant this effect first runs. Keep retrying
-        // briefly instead of giving up permanently on a single failed check.
-        retryId = setTimeout(init, 150);
-        return;
-      }
-      const chart = window.LightweightCharts.createChart(chartEl.current, {
-        layout: { background: { color: '#080b12' }, textColor: '#d1d5db' },
-        grid: { vertLines: { color: '#111827' }, horzLines: { color: '#111827' } },
-        rightPriceScale: { borderColor: '#1f2937' },
-        timeScale: { borderColor: '#1f2937', timeVisible: true, secondsVisible: false },
-        height: 480,
-      });
-      chartRef.current = chart;
-      candleSeries.current = chart.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444' });
-      ema8Series.current = chart.addLineSeries({ color: '#60a5fa', lineWidth: 1 });
-      ema21Series.current = chart.addLineSeries({ color: '#a78bfa', lineWidth: 1 });
-      vwapSeries.current = chart.addLineSeries({ color: '#f59e0b', lineWidth: 2 });
-      const resize = () => chart.applyOptions({ width: chartEl.current.clientWidth });
-      resize();
-      window.addEventListener('resize', resize);
-      removeResizeListener = () => window.removeEventListener('resize', resize);
-      setChartReady(true);
-    }
+    const container = chartEl.current;
+    const chart = createChart(container, {
+      layout: { background: { color: '#080b12' }, textColor: '#d1d5db' },
+      grid: { vertLines: { color: '#111827' }, horzLines: { color: '#111827' } },
+      rightPriceScale: { borderColor: '#1f2937' },
+      timeScale: { borderColor: '#1f2937', timeVisible: true, secondsVisible: false },
+      width: Math.max(container.clientWidth, 320),
+      height: Math.max(container.clientHeight, 480),
+    });
 
-    init();
-    return () => {
-      cancelled = true;
-      if (retryId) clearTimeout(retryId);
-      removeResizeListener();
+    chartRef.current = chart;
+    candleSeries.current = chart.addCandlestickSeries({
+      upColor: '#22c55e', downColor: '#ef4444', borderVisible: false,
+      wickUpColor: '#22c55e', wickDownColor: '#ef4444'
+    });
+    ema8Series.current = chart.addLineSeries({ color: '#60a5fa', lineWidth: 1 });
+    ema21Series.current = chart.addLineSeries({ color: '#a78bfa', lineWidth: 1 });
+    vwapSeries.current = chart.addLineSeries({ color: '#f59e0b', lineWidth: 2 });
+
+    const resize = () => {
+      if (!chartEl.current || !chartRef.current) return;
+      chartRef.current.applyOptions({
+        width: Math.max(chartEl.current.clientWidth, 320),
+        height: Math.max(chartEl.current.clientHeight, 480),
+      });
     };
+
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null;
+    if (observer) observer.observe(container);
+    window.addEventListener('resize', resize);
+    requestAnimationFrame(resize);
+    removeResizeListener = () => {
+      window.removeEventListener('resize', resize);
+      if (observer) observer.disconnect();
+      chart.remove();
+      chartRef.current = null;
+    };
+    setChartReady(true);
+
+    return () => removeResizeListener();
   }, []);
 
   useEffect(() => {
@@ -148,16 +181,14 @@ function App() {
     if (!trade || trade.exitIndex || !current || idx === trade.entryIndex) return;
     const completed = { ...trade, exitIndex: idx, exitPrice: current.close, exitTime: current.time };
     setTrade(completed);
-    const res = await fetch(`${API_BASE}/api/trainer/score`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...completed, bars }) });
-    const data = await res.json();
+    const data = await apiFetch('/api/trainer/score', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...completed, bars }) });
     setScore(data); setPlaying(false); setTab('critique');
     const row = { at: new Date().toLocaleString(), scenario: context?.scenarioLabel, direction: completed.direction, entry: completed.entryPrice, exit: completed.exitPrice, score: data.score, grade: data.grade, pnl: data.pnlPoints, mistakes: data.mistakes || [] };
     const nextJournal = [row, ...journal].slice(0, 50);
     setJournal(nextJournal); localStorage.setItem('spxAcademyJournal', JSON.stringify(nextJournal));
   }
   async function askCoach(nextIdx = idx) {
-    const res = await fetch(`${API_BASE}/api/trainer/coach`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bars, index: nextIdx }) });
-    setCoach(await res.json());
+    setCoach(await apiFetch('/api/trainer/coach', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bars, index: nextIdx }) }));
   }
   function resetJournal() { localStorage.removeItem('spxAcademyJournal'); setJournal([]); }
 
@@ -175,6 +206,8 @@ function App() {
         <button onClick={() => loadSession(scenario)}>New Session</button>
       </div>
     </header>
+
+    {apiError && <div className="panel warning"><h2>Chart/API Connection Issue</h2><p>{apiError}</p><p className="hint">Set VITE_API_BASE_URL in the Render static site to your backend URL, then redeploy the frontend.</p></div>}
 
     {loading ? <div className="panel">Loading Academy simulator…</div> : <>
       <section className="topGrid">
@@ -237,4 +270,3 @@ function Curriculum({ lessons }) {
   return <div className="curriculum">{lessons.map((l, i) => <div className="panel" key={i}><h2>{l.title}</h2><p>{l.body}</p><ul>{l.checks?.map((c, n) => <li key={n}>{c}</li>)}</ul></div>)}<div className="panel"><h2>How to Use This Dashboard</h2><ol><li>Pick a scenario.</li><li>Press Play or Next Candle.</li><li>Say out loud: trend, value, candle, risk.</li><li>Enter CALL/PUT bias only when the setup is clean.</li><li>Exit within 15 minutes and review the critique.</li></ol></div></div>;
 }
 
-createRoot(document.getElementById('root')).render(<App />);
