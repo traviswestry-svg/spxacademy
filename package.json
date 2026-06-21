@@ -1,0 +1,11 @@
+{
+  "name": "spx-0dte-academy-dashboard-root",
+  "version": "1.0.1",
+  "private": true,
+  "scripts": {
+    "build": "npm install --prefix frontend && npm run build --prefix frontend",
+    "start": "npm run build"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

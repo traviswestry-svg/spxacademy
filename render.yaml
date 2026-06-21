@@ -1,25 +1,20 @@
 services:
-  # ── Python API backend ──────────────────────────────────────────────────────
   - type: web
-    name: trading-learning-api
+    name: spxacademy-api
     env: python
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
     healthCheckPath: /health
-    envVars:
-      - key: POLYGON_API_KEY
-        sync: false          # set manually in Render dashboard
-      - key: TV_WEBHOOK_SECRET
-        sync: false
 
-  # ── React / Vite static frontend ────────────────────────────────────────────
   - type: web
-    name: trading-learning-dashboard
+    name: spxacademy
     env: static
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: dist
     envVars:
+      - key: NODE_VERSION
+        value: 20.19.5
       - key: VITE_API_BASE_URL
-        value: https://trading-learning-api.onrender.com
+        value: https://spxacademy-api.onrender.com
