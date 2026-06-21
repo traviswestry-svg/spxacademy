@@ -33,6 +33,7 @@ function App() {
   const [lessons, setLessons] = useState([]);
   const [scenarios, setScenarios] = useState({});
   const [journal, setJournal] = useState(() => JSON.parse(localStorage.getItem('spxAcademyJournal') || '[]'));
+  const [chartReady, setChartReady] = useState(false);
 
   const current = bars[idx];
   const visible = useMemo(() => bars.slice(0, idx + 1), [bars, idx]);
@@ -66,22 +67,45 @@ function App() {
   useEffect(() => { loadLessons(); loadSession('news'); }, []);
 
   useEffect(() => {
-    if (!chartEl.current || chartRef.current || !window.LightweightCharts) return;
-    const chart = window.LightweightCharts.createChart(chartEl.current, {
-      layout: { background: { color: '#080b12' }, textColor: '#d1d5db' },
-      grid: { vertLines: { color: '#111827' }, horzLines: { color: '#111827' } },
-      rightPriceScale: { borderColor: '#1f2937' },
-      timeScale: { borderColor: '#1f2937', timeVisible: true, secondsVisible: false },
-      height: 480,
-    });
-    chartRef.current = chart;
-    candleSeries.current = chart.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444' });
-    ema8Series.current = chart.addLineSeries({ color: '#60a5fa', lineWidth: 1 });
-    ema21Series.current = chart.addLineSeries({ color: '#a78bfa', lineWidth: 1 });
-    vwapSeries.current = chart.addLineSeries({ color: '#f59e0b', lineWidth: 2 });
-    const resize = () => chart.applyOptions({ width: chartEl.current.clientWidth });
-    resize(); window.addEventListener('resize', resize);
-    return () => window.removeEventListener('resize', resize);
+    if (!chartEl.current || chartRef.current) return;
+    let cancelled = false;
+    let retryId = null;
+    let removeResizeListener = () => {};
+
+    function init() {
+      if (cancelled) return;
+      if (!window.LightweightCharts) {
+        // The charting library loads from an external CDN script tag and may
+        // not be ready the instant this effect first runs. Keep retrying
+        // briefly instead of giving up permanently on a single failed check.
+        retryId = setTimeout(init, 150);
+        return;
+      }
+      const chart = window.LightweightCharts.createChart(chartEl.current, {
+        layout: { background: { color: '#080b12' }, textColor: '#d1d5db' },
+        grid: { vertLines: { color: '#111827' }, horzLines: { color: '#111827' } },
+        rightPriceScale: { borderColor: '#1f2937' },
+        timeScale: { borderColor: '#1f2937', timeVisible: true, secondsVisible: false },
+        height: 480,
+      });
+      chartRef.current = chart;
+      candleSeries.current = chart.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444' });
+      ema8Series.current = chart.addLineSeries({ color: '#60a5fa', lineWidth: 1 });
+      ema21Series.current = chart.addLineSeries({ color: '#a78bfa', lineWidth: 1 });
+      vwapSeries.current = chart.addLineSeries({ color: '#f59e0b', lineWidth: 2 });
+      const resize = () => chart.applyOptions({ width: chartEl.current.clientWidth });
+      resize();
+      window.addEventListener('resize', resize);
+      removeResizeListener = () => window.removeEventListener('resize', resize);
+      setChartReady(true);
+    }
+
+    init();
+    return () => {
+      cancelled = true;
+      if (retryId) clearTimeout(retryId);
+      removeResizeListener();
+    };
   }, []);
 
   useEffect(() => {
@@ -95,7 +119,7 @@ function App() {
     if (trade?.exitIndex <= idx) markers.push({ time: chartTime(bars[trade.exitIndex].time), position: trade.direction === 'long' ? 'aboveBar' : 'belowBar', color: '#f97316', shape: 'circle', text: 'EXIT' });
     candleSeries.current.setMarkers(markers);
     chartRef.current.timeScale().fitContent();
-  }, [visible, trade, idx, bars]);
+  }, [visible, trade, idx, bars, chartReady]);
 
   useEffect(() => {
     if (!playing) return;
