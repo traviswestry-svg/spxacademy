@@ -1,240 +1,324 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { createRoot } from 'react-dom/client';
-import './style.css';
+import math
+import os
+import random
+from datetime import datetime, timedelta, timezone
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+import requests
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
-function fmt(n) {
-  if (n === undefined || n === null || Number.isNaN(Number(n))) return '—';
-  return Number(n).toFixed(2);
+app = Flask(__name__)
+CORS(app)
+
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+MASSIVE_BASE = os.getenv("MASSIVE_BASE", "https://api.massive.com")
+DEFAULT_SYMBOL = os.getenv("TRAINER_SYMBOL", "SPX")
+PROXY_TICKER = os.getenv("TRAINER_PROXY_TICKER", "SPY")
+
+LESSONS = [
+    {
+        "title": "A+ 0DTE Entry Checklist",
+        "body": "Trade with trend, near value, after a confirmation candle. Avoid chasing wide candles far from EMA8/VWAP. Your job is not to predict every move; it is to wait for the cleanest 15-minute opportunity.",
+        "checks": ["VWAP side agrees with your trade", "EMA8 is on the correct side of EMA21", "Entry candle closes in your direction", "Risk is defined before entry", "Exit plan is under 15 minutes"],
+    },
+    {
+        "title": "Candle Reading for SPX Speed",
+        "body": "On SPX 0DTE, a candle is not just green or red. Read body size, wick rejection, location versus VWAP, and whether the candle appears after extension or pullback.",
+        "checks": ["Big body after extension can be a chase trap", "Long lower wick near VWAP can show dip absorption", "Long upper wick near resistance can show supply", "Doji after a run means decision pressure, not confidence"],
+    },
+    {
+        "title": "Exit Discipline",
+        "body": "The simulator rewards trade management: protect capital, take high-quality movement, and avoid turning a quick 0DTE scalp into a hope trade.",
+        "checks": ["Take partial/exit when momentum slows", "Do not let a green trade reverse to red", "Exit if thesis candle fails", "Respect the 15-minute training window"],
+    },
+]
+
+SCENARIOS = {
+    "trend_up": {"label": "Trend Up Pullback", "trend": 1.0, "chop": 0.8, "trap": 0.5, "description": "Bull trend with pullbacks to VWAP/EMA. Teaches patience and pullback entries."},
+    "trend_down": {"label": "Trend Down Rejection", "trend": -1.0, "chop": 0.8, "trap": 0.5, "description": "Bear trend with failed bounces. Teaches short entries after rejection."},
+    "chop": {"label": "Chop / No-Trade Day", "trend": 0.0, "chop": 2.1, "trap": 1.4, "description": "Fast rotations and fake breaks. Teaches when not to trade."},
+    "reversal": {"label": "Morning Reversal", "trend": 0.7, "chop": 1.25, "trap": 1.1, "description": "Initial move reverses. Teaches not marrying bias."},
+    "news": {"label": "News Spike Hard Mode", "trend": 0.25, "chop": 2.6, "trap": 2.2, "description": "Violent candles and slippage-like movement. Teaches caution around speed."},
 }
-function chartTime(iso) { return Math.floor(new Date(iso).getTime() / 1000); }
-function clock(iso) { return iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'; }
 
-function App() {
-  const chartEl = useRef(null);
-  const chartRef = useRef(null);
-  const candleSeries = useRef(null);
-  const ema8Series = useRef(null);
-  const ema21Series = useRef(null);
-  const vwapSeries = useRef(null);
-  const timerRef = useRef(null);
 
-  const [bars, setBars] = useState([]);
-  const [context, setContext] = useState(null);
-  const [idx, setIdx] = useState(45);
-  const [loading, setLoading] = useState(true);
-  const [playing, setPlaying] = useState(false);
-  const [scenario, setScenario] = useState('news');
-  const [trade, setTrade] = useState(null);
-  const [score, setScore] = useState(null);
-  const [coach, setCoach] = useState(null);
-  const [tab, setTab] = useState('arena');
-  const [lessons, setLessons] = useState([]);
-  const [scenarios, setScenarios] = useState({});
-  const [journal, setJournal] = useState(() => JSON.parse(localStorage.getItem('spxAcademyJournal') || '[]'));
-  const [chartReady, setChartReady] = useState(false);
+def ema(values, period):
+    if not values:
+        return []
+    k = 2 / (period + 1)
+    out = [values[0]]
+    for value in values[1:]:
+        out.append(value * k + out[-1] * (1 - k))
+    return out
 
-  const current = bars[idx];
-  const visible = useMemo(() => bars.slice(0, idx + 1), [bars, idx]);
-  const stats = useMemo(() => {
-    if (!journal.length) return { reps: 0, avg: 0, win: 0, chase: 0 };
-    const reps = journal.length;
-    const avg = journal.reduce((s, j) => s + Number(j.score || 0), 0) / reps;
-    const wins = journal.filter(j => Number(j.pnl) > 0).length;
-    const chase = journal.filter(j => (j.mistakes || []).includes('chased extension')).length;
-    return { reps, avg, win: (wins / reps) * 100, chase: (chase / reps) * 100 };
-  }, [journal]);
 
-  async function loadLessons() {
-    try {
-      const res = await fetch(`${API_BASE}/api/trainer/lessons`);
-      const data = await res.json();
-      setLessons(data.lessons || []);
-      setScenarios(data.scenarios || {});
-    } catch (e) {}
-  }
+def atr(bars, period=14):
+    if not bars:
+        return []
+    trs = []
+    for i, bar in enumerate(bars):
+        prev_close = bars[i - 1]["close"] if i else bar["close"]
+        tr = max(bar["high"] - bar["low"], abs(bar["high"] - prev_close), abs(bar["low"] - prev_close))
+        trs.append(tr)
+    out = []
+    running = trs[0]
+    for i, tr in enumerate(trs):
+        if i < period:
+            running = sum(trs[: i + 1]) / (i + 1)
+        else:
+            running = ((running * (period - 1)) + tr) / period
+        out.append(running)
+    return out
 
-  async function loadSession(nextScenario = scenario) {
-    setLoading(true); setPlaying(false); setTrade(null); setScore(null); setCoach(null); setIdx(45);
-    const res = await fetch(`${API_BASE}/api/trainer/session?scenario=${nextScenario}`);
-    const data = await res.json();
-    setBars(data.bars || []);
-    setContext(data.context || null);
-    setLoading(false);
-  }
 
-  useEffect(() => { loadLessons(); loadSession('news'); }, []);
-
-  useEffect(() => {
-    if (!chartEl.current || chartRef.current) return;
-    let cancelled = false;
-    let retryId = null;
-    let removeResizeListener = () => {};
-
-    function init() {
-      if (cancelled) return;
-      if (!window.LightweightCharts) {
-        // The charting library loads from an external CDN script tag and may
-        // not be ready the instant this effect first runs. Keep retrying
-        // briefly instead of giving up permanently on a single failed check.
-        retryId = setTimeout(init, 150);
-        return;
-      }
-      const chart = window.LightweightCharts.createChart(chartEl.current, {
-        layout: { background: { color: '#080b12' }, textColor: '#d1d5db' },
-        grid: { vertLines: { color: '#111827' }, horzLines: { color: '#111827' } },
-        rightPriceScale: { borderColor: '#1f2937' },
-        timeScale: { borderColor: '#1f2937', timeVisible: true, secondsVisible: false },
-        height: 480,
-      });
-      chartRef.current = chart;
-      candleSeries.current = chart.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444' });
-      ema8Series.current = chart.addLineSeries({ color: '#60a5fa', lineWidth: 1 });
-      ema21Series.current = chart.addLineSeries({ color: '#a78bfa', lineWidth: 1 });
-      vwapSeries.current = chart.addLineSeries({ color: '#f59e0b', lineWidth: 2 });
-      const resize = () => chart.applyOptions({ width: chartEl.current.clientWidth });
-      resize();
-      window.addEventListener('resize', resize);
-      removeResizeListener = () => window.removeEventListener('resize', resize);
-      setChartReady(true);
+def classify_candle(bar, prev=None):
+    rng = max(bar["high"] - bar["low"], 0.01)
+    body = abs(bar["close"] - bar["open"])
+    upper = bar["high"] - max(bar["open"], bar["close"])
+    lower = min(bar["open"], bar["close"]) - bar["low"]
+    direction = "bullish" if bar["close"] > bar["open"] else "bearish" if bar["close"] < bar["open"] else "doji"
+    shape = "normal candle"
+    lesson = "Normal candle. Judge it by location: VWAP, EMA8/EMA21, prior high/low, and whether it follows extension or pullback."
+    if body / rng < 0.18:
+        shape = "doji / indecision"
+        lesson = "Doji/indecision: neither side controlled the close. On SPX 0DTE, this usually says wait unless the next candle confirms direction."
+    elif lower / rng > 0.42 and direction == "bullish":
+        shape = "bullish rejection"
+        lesson = "Bullish rejection: sellers pushed down, buyers reclaimed. Stronger when it happens at VWAP, EMA21, or prior support."
+    elif upper / rng > 0.42 and direction == "bearish":
+        shape = "bearish rejection"
+        lesson = "Bearish rejection: buyers pushed up, sellers rejected. Stronger when it happens below VWAP or at prior resistance."
+    elif body / rng > 0.64:
+        shape = "wide momentum candle"
+        lesson = "Wide momentum candle: confirms force, but entering late after it can be a chase. Prefer pullback or continuation confirmation."
+    if prev:
+        if bar["close"] > prev["high"] and direction == "bullish":
+            shape = "bullish outside / breakout candle"
+            lesson = "Bullish outside/breakout candle: strong, but avoid buying the top if it is far from EMA8/VWAP."
+        if bar["close"] < prev["low"] and direction == "bearish":
+            shape = "bearish outside / breakdown candle"
+            lesson = "Bearish outside/breakdown candle: strong, but avoid shorting the low if it is extended from value."
+    return {
+        "direction": direction,
+        "shape": shape,
+        "lesson": lesson,
+        "bodyPct": round(100 * body / rng),
+        "upperWickPct": round(100 * upper / rng),
+        "lowerWickPct": round(100 * lower / rng),
     }
 
-    init();
-    return () => {
-      cancelled = true;
-      if (retryId) clearTimeout(retryId);
-      removeResizeListener();
-    };
-  }, []);
 
-  useEffect(() => {
-    if (!candleSeries.current || !visible.length) return;
-    candleSeries.current.setData(visible.map(b => ({ time: chartTime(b.time), open: b.open, high: b.high, low: b.low, close: b.close })));
-    ema8Series.current.setData(visible.map(b => ({ time: chartTime(b.time), value: b.ema8 })));
-    ema21Series.current.setData(visible.map(b => ({ time: chartTime(b.time), value: b.ema21 })));
-    vwapSeries.current.setData(visible.map(b => ({ time: chartTime(b.time), value: b.vwap })));
-    const markers = [];
-    if (trade?.entryIndex <= idx) markers.push({ time: chartTime(bars[trade.entryIndex].time), position: trade.direction === 'long' ? 'belowBar' : 'aboveBar', color: '#22c55e', shape: trade.direction === 'long' ? 'arrowUp' : 'arrowDown', text: `${trade.direction.toUpperCase()} ENTRY` });
-    if (trade?.exitIndex <= idx) markers.push({ time: chartTime(bars[trade.exitIndex].time), position: trade.direction === 'long' ? 'aboveBar' : 'belowBar', color: '#f97316', shape: 'circle', text: 'EXIT' });
-    candleSeries.current.setMarkers(markers);
-    chartRef.current.timeScale().fitContent();
-  }, [visible, trade, idx, bars, chartReady]);
+def add_indicators(bars):
+    closes = [b["close"] for b in bars]
+    e8 = ema(closes, 8)
+    e21 = ema(closes, 21)
+    e50 = ema(closes, 50)
+    a14 = atr(bars, 14)
+    cpv = 0.0
+    cv = 0.0
+    for i, bar in enumerate(bars):
+        tp = (bar["high"] + bar["low"] + bar["close"]) / 3
+        volume = max(float(bar.get("volume", 1)), 1.0)
+        cpv += tp * volume
+        cv += volume
+        bar["ema8"] = round(e8[i], 2)
+        bar["ema21"] = round(e21[i], 2)
+        bar["ema50"] = round(e50[i], 2)
+        bar["vwap"] = round(cpv / cv, 2)
+        bar["atr"] = round(a14[i], 2)
+        bar["candle"] = classify_candle(bar, bars[i - 1] if i else None)
+    return bars
 
-  useEffect(() => {
-    if (!playing) return;
-    timerRef.current = setInterval(() => stepForward(), 850);
-    return () => clearInterval(timerRef.current);
-  }, [playing, idx, trade, bars]);
 
-  function stepForward() {
-    setIdx(prev => {
-      const next = Math.min(prev + 1, Math.max(bars.length - 1, 0));
-      if (trade && !trade.exitIndex && next - trade.entryIndex >= 15) setPlaying(false);
-      return next;
-    });
-  }
-  function changeScenario(e) {
-    const next = e.target.value;
-    setScenario(next);
-    loadSession(next);
-  }
-  function enter(direction) {
-    if (!current || trade?.entryIndex) return;
-    setScore(null);
-    setTrade({ direction, entryIndex: idx, entryPrice: current.close, entryTime: current.time });
-  }
-  async function exitTrade() {
-    if (!trade || trade.exitIndex || !current || idx === trade.entryIndex) return;
-    const completed = { ...trade, exitIndex: idx, exitPrice: current.close, exitTime: current.time };
-    setTrade(completed);
-    const res = await fetch(`${API_BASE}/api/trainer/score`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...completed, bars }) });
-    const data = await res.json();
-    setScore(data); setPlaying(false); setTab('critique');
-    const row = { at: new Date().toLocaleString(), scenario: context?.scenarioLabel, direction: completed.direction, entry: completed.entryPrice, exit: completed.exitPrice, score: data.score, grade: data.grade, pnl: data.pnlPoints, mistakes: data.mistakes || [] };
-    const nextJournal = [row, ...journal].slice(0, 50);
-    setJournal(nextJournal); localStorage.setItem('spxAcademyJournal', JSON.stringify(nextJournal));
-  }
-  async function askCoach(nextIdx = idx) {
-    const res = await fetch(`${API_BASE}/api/trainer/coach`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bars, index: nextIdx }) });
-    setCoach(await res.json());
-  }
-  function resetJournal() { localStorage.removeItem('spxAcademyJournal'); setJournal([]); }
+def fetch_market_bars():
+    if not POLYGON_API_KEY:
+        return None
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=18)
+    end = today + timedelta(days=1)
+    url = f"{MASSIVE_BASE}/v2/aggs/ticker/{PROXY_TICKER}/range/1/minute/{start}/{end}?adjusted=true&sort=asc&limit=50000&apiKey={POLYGON_API_KEY}"
+    try:
+        resp = requests.get(url, timeout=20)
+        data = resp.json()
+        if resp.status_code != 200 or not data.get("results"):
+            return None
+        raw = data["results"][-390:]
+        scale = 10.0 if DEFAULT_SYMBOL.upper() == "SPX" else 1.0
+        bars = []
+        for r in raw:
+            ts = datetime.fromtimestamp(r["t"] / 1000, tz=timezone.utc).astimezone().isoformat()
+            bars.append({"time": ts, "open": round(r["o"] * scale, 2), "high": round(r["h"] * scale, 2), "low": round(r["l"] * scale, 2), "close": round(r["c"] * scale, 2), "volume": int(r.get("v", 1))})
+        return bars
+    except Exception:
+        return None
 
-  const tradeAge = trade && !trade.exitIndex ? idx - trade.entryIndex : trade?.exitIndex ? trade.exitIndex - trade.entryIndex : 0;
-  const unreal = trade && !trade.exitIndex && current ? (current.close - trade.entryPrice) * (trade.direction === 'long' ? 1 : -1) : null;
 
-  return <div className="app">
-    <header>
-      <div>
-        <h1>SPX 0DTE Academy Dashboard v1.0</h1>
-        <p>Training-only replay simulator for reading candles, practicing 15-minute SPX-style trades, and receiving entry/exit critique.</p>
-      </div>
-      <div className="headerActions">
-        <select value={scenario} onChange={changeScenario}>{Object.entries(scenarios).map(([key, val]) => <option key={key} value={key}>{val.label}</option>)}</select>
-        <button onClick={() => loadSession(scenario)}>New Session</button>
-      </div>
-    </header>
+def synthetic_session(scenario="news", seed=None):
+    cfg = SCENARIOS.get(scenario, SCENARIOS["news"])
+    rng = random.Random(seed or f"{datetime.utcnow().strftime('%Y%m%d%H%M')}-{scenario}")
+    bars = []
+    base = 6100 + rng.uniform(-85, 85)
+    price = base
+    start = datetime.now().replace(hour=9, minute=30, second=0, microsecond=0)
+    trend_strength = cfg["trend"] * rng.uniform(0.09, 0.28)
+    reverse_at = rng.choice([55, 80, 118]) if scenario == "reversal" else None
+    for i in range(210):
+        if reverse_at and i == reverse_at:
+            trend_strength *= -1.85
+        burst = 1.0
+        if 18 < i < 45 or 78 < i < 110 or 142 < i < 172:
+            burst = rng.uniform(1.3, 2.8) * cfg["trap"]
+        mean_revert = -0.024 * (price - base) * (1.4 if scenario == "chop" else 0.7)
+        chop_wave = math.sin(i / rng.uniform(3.3, 6.2)) * rng.uniform(0.5, 2.2) * cfg["chop"]
+        shock = rng.gauss(0, 1.25 * burst * max(cfg["chop"], 0.7))
+        drift = trend_strength + mean_revert + chop_wave + shock
+        if scenario in ("trend_up", "trend_down"):
+            drift += trend_strength * i / 55
+        if scenario == "news" and i in (38, 96, 151):
+            drift += rng.choice([-1, 1]) * rng.uniform(7, 16)
+        o = price
+        c = price + drift
+        wick = abs(rng.gauss(2.4, 1.1)) * max(burst, 1)
+        h = max(o, c) + wick * rng.uniform(0.35, 1.35)
+        l = min(o, c) - wick * rng.uniform(0.35, 1.35)
+        volume = int(rng.uniform(85000, 390000) * max(burst, 1))
+        bars.append({"time": (start + timedelta(minutes=i)).isoformat(), "open": round(o, 2), "high": round(h, 2), "low": round(l, 2), "close": round(c, 2), "volume": volume})
+        price = c
+    return bars
 
-    {loading ? <div className="panel">Loading Academy simulator…</div> : <>
-      <section className="topGrid">
-        <div className="card"><span>Scenario</span><strong>{context?.scenarioLabel}</strong><em>{context?.difficulty}</em></div>
-        <div className="card"><span>Replay Time</span><strong>{clock(current?.time)}</strong><em>Candle {idx + 1} / {bars.length}</em></div>
-        <div className="card"><span>Trade Clock</span><strong className={tradeAge >= 12 ? 'danger' : ''}>{trade ? `${tradeAge}/15 min` : 'No trade'}</strong><em>Exit before minute 15</em></div>
-        <div className="card"><span>Report Card</span><strong>{stats.reps} reps</strong><em>Avg {stats.avg.toFixed(0)} · Win {stats.win.toFixed(0)}% · Chase {stats.chase.toFixed(0)}%</em></div>
-      </section>
 
-      <nav className="tabs">
-        {['arena','coach','critique','journal','curriculum'].map(t => <button key={t} onClick={() => setTab(t)} className={tab === t ? 'active' : ''}>{t === 'arena' ? 'Training Arena' : t === 'coach' ? 'Candle Coach' : t === 'critique' ? 'Trade Critique' : t === 'journal' ? 'Performance Journal' : 'Academy Lessons'}</button>)}
-      </nav>
+def session_context(bars, scenario="news", source="synthetic"):
+    first = bars[0]["open"]
+    last = bars[-1]["close"]
+    hi = max(b["high"] for b in bars)
+    lo = min(b["low"] for b in bars)
+    cfg = SCENARIOS.get(scenario, SCENARIOS["news"])
+    return {
+        "symbol": DEFAULT_SYMBOL,
+        "instrument": "SPX 0DTE Academy Dashboard v1.0",
+        "warning": "Training only. This dashboard does not place trades and is not financial advice.",
+        "rangePoints": round(hi - lo, 2),
+        "netMovePoints": round(last - first, 2),
+        "difficulty": cfg["description"],
+        "scenario": scenario,
+        "scenarioLabel": cfg["label"],
+        "source": source,
+    }
 
-      <main className="layout">
-        <section className="chartPanel">
-          <div className="chartToolbar">
-            <button onClick={() => setIdx(Math.max(20, idx - 1))}>Back</button>
-            <button onClick={stepForward}>Next Candle</button>
-            <button onClick={() => setPlaying(!playing)}>{playing ? 'Pause' : 'Play'}</button>
-            <button className="long" disabled={!!trade?.entryIndex} onClick={() => enter('long')}>Enter CALL Bias</button>
-            <button className="short" disabled={!!trade?.entryIndex} onClick={() => enter('short')}>Enter PUT Bias</button>
-            <button className="exit" disabled={!trade || !!trade.exitIndex || idx === trade.entryIndex} onClick={exitTrade}>Exit / Score</button>
-            <button onClick={() => askCoach()}>Coach This Candle</button>
-          </div>
-          <div ref={chartEl} className="chart" />
-          <div className="legend"><span className="ema8">EMA8</span><span className="ema21">EMA21</span><span className="vwap">VWAP</span><span>Training only — no orders are placed.</span></div>
-        </section>
 
-        <aside className="side">
-          {tab === 'arena' && <Arena current={current} trade={trade} unreal={unreal} context={context} />}
-          {tab === 'coach' && <Coach current={current} coach={coach} askCoach={askCoach} />}
-          {tab === 'critique' && <Critique score={score} />}
-          {tab === 'journal' && <Journal journal={journal} resetJournal={resetJournal} />}
-          {tab === 'curriculum' && <Curriculum lessons={lessons} />}
-        </aside>
-      </main>
-    </>}
-  </div>;
-}
+def clamp(v, lo=0, hi=100):
+    return max(lo, min(hi, v))
 
-function Arena({ current, trade, unreal, context }) {
-  return <>
-    <div className="panel"><h2>Current Candle Read</h2><p><b>Close:</b> {fmt(current?.close)} | <b>VWAP:</b> {fmt(current?.vwap)}</p><p><b>EMA8/21/50:</b> {fmt(current?.ema8)} / {fmt(current?.ema21)} / {fmt(current?.ema50)}</p><p><b>Candle:</b> {current?.candle?.shape} · {current?.candle?.direction}</p><p className="hint">Body {current?.candle?.bodyPct}% · Upper wick {current?.candle?.upperWickPct}% · Lower wick {current?.candle?.lowerWickPct}%</p></div>
-    <div className="panel"><h2>Open Trade</h2>{trade ? <><p><b>{trade.direction.toUpperCase()}</b> from {fmt(trade.entryPrice)}</p><p><b>Unrealized:</b> <span className={unreal >= 0 ? 'good' : 'bad'}>{unreal === null ? '—' : `${unreal >= 0 ? '+' : ''}${fmt(unreal)} pts`}</span></p><p className="hint">Academy rule: manage the trade inside 15 minutes. Do not hold and hope.</p></> : <p>No trade yet. Read trend, wait for value, then require confirmation.</p>}</div>
-    <div className="panel checklist"><h2>Before Entry Checklist</h2><label><input type="checkbox"/> VWAP agrees with direction</label><label><input type="checkbox"/> EMA8/EMA21 aligned</label><label><input type="checkbox"/> Not chasing far from value</label><label><input type="checkbox"/> Candle confirms direction</label><label><input type="checkbox"/> Exit plan under 15 minutes</label></div>
-    <div className="panel warning"><h2>Scenario Brief</h2><p>{context?.warning}</p></div>
-  </>;
-}
-function Coach({ current, coach, askCoach }) {
-  return <><div className="panel coach"><h2>Why This Candle Matters</h2><p>{current?.candle?.lesson}</p><button onClick={() => askCoach()}>Generate Coach Verdict</button></div>{coach && <div className="panel"><h2>Coach Verdict</h2><p>{coach.lesson}</p><div className="scoreGrid"><span>Long {coach.longQuality?.score}/100</span><span>Short {coach.shortQuality?.score}/100</span><span>Bias {coach.bias}</span><span>{coach.bestAction}</span></div></div>}<div className="panel"><h2>Wait vs Trade Rule</h2><p>If both long and short quality are under 78, the correct Academy answer is usually WAIT. 0DTE survival comes from passing on mediocre candles.</p></div></>;
-}
-function Critique({ score }) {
-  if (!score) return <div className="panel"><h2>Trade Critique</h2><p>Complete a trade to receive your grade, entry critique, exit critique, MFE/MAE, and mistake tags.</p></div>;
-  return <div className="panel score"><h2>Trade Score: {score.score}/100 · {score.grade}</h2><p>{score.summary}</p><div className="scoreGrid"><span>Entry {score.entryScore}/60</span><span>Exit {score.exitScore}/40</span><span>P/L {score.pnlPoints > 0 ? '+' : ''}{score.pnlPoints} pts</span><span>MFE Capture {score.capturePct}%</span></div>{score.mistakes?.length > 0 && <p className="bad"><b>Mistake tags:</b> {score.mistakes.join(', ')}</p>}<ul>{score.details?.map((d, i) => <li key={i}>{d}</li>)}</ul></div>;
-}
-function Journal({ journal, resetJournal }) {
-  return <div className="panel journal"><h2>Performance Journal</h2>{journal.length === 0 ? <p>No scored reps yet.</p> : <table><thead><tr><th>Time</th><th>Scenario</th><th>Side</th><th>Entry</th><th>Exit</th><th>P/L</th><th>Score</th></tr></thead><tbody>{journal.map((j, i) => <tr key={i}><td>{j.at}</td><td>{j.scenario}</td><td>{j.direction}</td><td>{fmt(j.entry)}</td><td>{fmt(j.exit)}</td><td className={j.pnl > 0 ? 'good' : 'bad'}>{j.pnl > 0 ? '+' : ''}{fmt(j.pnl)}</td><td>{j.score} / {j.grade}</td></tr>)}</tbody></table>}<button onClick={resetJournal}>Clear Journal</button></div>;
-}
-function Curriculum({ lessons }) {
-  return <div className="curriculum">{lessons.map((l, i) => <div className="panel" key={i}><h2>{l.title}</h2><p>{l.body}</p><ul>{l.checks?.map((c, n) => <li key={n}>{c}</li>)}</ul></div>)}<div className="panel"><h2>How to Use This Dashboard</h2><ol><li>Pick a scenario.</li><li>Press Play or Next Candle.</li><li>Say out loud: trend, value, candle, risk.</li><li>Enter CALL/PUT bias only when the setup is clean.</li><li>Exit within 15 minutes and review the critique.</li></ol></div></div>;
-}
 
-createRoot(document.getElementById('root')).render(<App />);
+def setup_quality_at(bars, i, direction):
+    b = bars[i]
+    sign = 1 if direction == "long" else -1
+    trend_good = (b["ema8"] > b["ema21"] and b["close"] > b["vwap"]) if sign == 1 else (b["ema8"] < b["ema21"] and b["close"] < b["vwap"])
+    near_value = min(abs(b["close"] - b["vwap"]), abs(b["close"] - b["ema8"]), abs(b["close"] - b["ema21"])) <= max(b.get("atr", 1) * 0.65, 1)
+    candle = b.get("candle", {})
+    confirm = (sign == 1 and candle.get("direction") == "bullish" and candle.get("lowerWickPct", 0) >= 15) or (sign == -1 and candle.get("direction") == "bearish" and candle.get("upperWickPct", 0) >= 15)
+    chase = abs(b["close"] - b["ema8"]) / max(b.get("atr", 1), 0.01)
+    score = (30 if trend_good else 8) + (25 if near_value else 8) + (25 if confirm else 7) + (20 if chase <= 0.95 else 6)
+    return {"score": round(clamp(score)), "trendGood": trend_good, "nearValue": near_value, "confirmation": confirm, "chaseMultiple": round(chase, 2)}
+
+
+def score_trade(payload):
+    bars = payload.get("bars", [])
+    entry_i = int(payload.get("entryIndex", -1))
+    exit_i = int(payload.get("exitIndex", -1))
+    direction = payload.get("direction", "long")
+    if not bars or entry_i < 2 or exit_i <= entry_i or exit_i >= len(bars):
+        return {"score": 0, "grade": "Invalid", "summary": "Trade could not be scored. Entry and exit must both exist after replay starts.", "details": []}
+    entry = bars[entry_i]
+    exitb = bars[exit_i]
+    sign = 1 if direction == "long" else -1
+    entry_price = float(payload.get("entryPrice", entry["close"]))
+    exit_price = float(payload.get("exitPrice", exitb["close"]))
+    pnl_points = round((exit_price - entry_price) * sign, 2)
+    window = exit_i - entry_i
+    trade_bars = bars[entry_i: exit_i + 1]
+    mfe = max((b["high"] - entry_price) if sign == 1 else (entry_price - b["low"]) for b in trade_bars)
+    mae = min((b["low"] - entry_price) if sign == 1 else (entry_price - b["high"]) for b in trade_bars)
+    capture = 0 if mfe <= 0 else clamp((pnl_points / mfe) * 100)
+    quality = setup_quality_at(bars, entry_i, direction)
+    entry_score = round(quality["score"] * 0.60)
+    exit_score = 0
+    exit_score += 12 if window <= 15 else 0
+    exit_score += 15 if capture >= 70 else 10 if capture >= 45 else 5 if pnl_points > 0 else 1
+    exit_score += 8 if pnl_points > 0 else 3 if abs(mae) <= max(entry.get("atr", 1), 1) else 1
+    exit_score += 5 if abs(mae) <= max(entry.get("atr", 1) * 1.25, 2) else 1
+    total = round(clamp(entry_score + exit_score))
+    grade = "A+" if total >= 95 else "A" if total >= 90 else "B" if total >= 80 else "C" if total >= 70 else "D" if total >= 60 else "Needs Work"
+    mistakes = []
+    if not quality["trendGood"]: mistakes.append("fought VWAP/EMA trend")
+    if not quality["nearValue"]: mistakes.append("entered away from value")
+    if not quality["confirmation"]: mistakes.append("weak candle confirmation")
+    if quality["chaseMultiple"] > 0.95: mistakes.append("chased extension")
+    if window > 15: mistakes.append("held beyond 15-minute drill")
+    details = [
+        f"P/L: {pnl_points:+.2f} points over {window} minute(s). MFE: {mfe:.2f}; MAE: {mae:.2f}; capture: {capture:.0f}%.",
+        "Entry aligned with VWAP/EMA trend." if quality["trendGood"] else "Entry fought the short-term VWAP/EMA trend. Wait for alignment unless intentionally practicing countertrend scalps.",
+        "Entry was near value." if quality["nearValue"] else "Entry was extended from VWAP/EMA value. SPX 0DTE punishes late entries because contracts move too fast.",
+        "Candle confirmation supported the entry." if quality["confirmation"] else "Candle confirmation was not clean. Look for rejection wick plus close in your direction.",
+        "Exit stayed inside the 15-minute rule." if window <= 15 else "Exit violated the 15-minute training rule.",
+    ]
+    summary = "Clean academy rep. Keep repeating this pattern." if total >= 85 else "Good learning rep. Main issue: " + (", ".join(mistakes) if mistakes else "exit management.")
+    return {"score": total, "grade": grade, "summary": summary, "pnlPoints": pnl_points, "mfe": round(mfe, 2), "mae": round(mae, 2), "capturePct": round(capture), "entryScore": entry_score, "exitScore": exit_score, "mistakes": mistakes, "details": details}
+
+
+@app.route("/")
+def root():
+    return jsonify({"app": "SPX 0DTE Academy Dashboard v1.0 API", "status": "ok", "training_only": True})
+
+
+@app.route("/health")
+def health():
+    return jsonify({"ok": True})
+
+
+@app.route("/api/trainer/lessons")
+def lessons():
+    return jsonify({"lessons": LESSONS, "scenarios": SCENARIOS})
+
+
+@app.route("/api/trainer/session")
+def trainer_session():
+    scenario = request.args.get("scenario", "news")
+    live = request.args.get("live", "false").lower() == "true"
+    source = "synthetic_hard_mode"
+    bars = fetch_market_bars() if live else None
+    if bars:
+        source = f"{PROXY_TICKER}_proxy_scaled"
+    else:
+        bars = synthetic_session(scenario=scenario)
+    bars = add_indicators(bars)
+    return jsonify({"bars": bars, "context": session_context(bars, scenario=scenario, source=source), "source": source})
+
+
+@app.route("/api/trainer/score", methods=["POST"])
+def trainer_score():
+    return jsonify(score_trade(request.get_json(force=True)))
+
+
+@app.route("/api/trainer/coach", methods=["POST"])
+def trainer_coach():
+    payload = request.get_json(force=True)
+    bars = payload.get("bars", [])
+    index = int(payload.get("index", 0))
+    if not bars or index < 0 or index >= len(bars):
+        return jsonify({"lesson": "No candle selected."})
+    b = bars[index]
+    bias = "bullish" if b["ema8"] > b["ema21"] and b["close"] > b["vwap"] else "bearish" if b["ema8"] < b["ema21"] and b["close"] < b["vwap"] else "mixed/choppy"
+    q_long = setup_quality_at(bars, index, "long")
+    q_short = setup_quality_at(bars, index, "short")
+    best = "WAIT"
+    if q_long["score"] >= 78 and q_long["score"] >= q_short["score"] + 8:
+        best = "LONG practice candidate"
+    elif q_short["score"] >= 78 and q_short["score"] >= q_long["score"] + 8:
+        best = "SHORT practice candidate"
+    lesson = f"Candle: {b['candle']['shape']} ({b['candle']['direction']}). Bias is {bias}. Coach call: {best}. Long quality {q_long['score']}/100; short quality {q_short['score']}/100. {b['candle']['lesson']}"
+    return jsonify({"lesson": lesson, "bias": bias, "longQuality": q_long, "shortQuality": q_short, "bestAction": best})
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
