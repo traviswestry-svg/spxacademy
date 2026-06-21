@@ -1,0 +1,25 @@
+services:
+  # ── Python API backend ──────────────────────────────────────────────────────
+  - type: web
+    name: trading-learning-api
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    healthCheckPath: /health
+    envVars:
+      - key: POLYGON_API_KEY
+        sync: false          # set manually in Render dashboard
+      - key: TV_WEBHOOK_SECRET
+        sync: false
+
+  # ── React / Vite static frontend ────────────────────────────────────────────
+  - type: web
+    name: trading-learning-dashboard
+    env: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        value: https://trading-learning-api.onrender.com
