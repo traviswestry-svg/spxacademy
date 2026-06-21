@@ -1,5 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { createChart } from 'lightweight-charts';
+import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './style.css';
 
@@ -13,12 +12,6 @@ function chartTime(iso) { return Math.floor(new Date(iso).getTime() / 1000); }
 function clock(iso) { return iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'; }
 
 function App() {
-  const chartEl = useRef(null);
-  const chartRef = useRef(null);
-  const candleSeries = useRef(null);
-  const ema8Series = useRef(null);
-  const ema21Series = useRef(null);
-  const vwapSeries = useRef(null);
   const timerRef = useRef(null);
 
   const [bars, setBars] = useState([]);
@@ -34,7 +27,6 @@ function App() {
   const [lessons, setLessons] = useState([]);
   const [scenarios, setScenarios] = useState({});
   const [journal, setJournal] = useState(() => JSON.parse(localStorage.getItem('spxAcademyJournal') || '[]'));
-  const [chartReady, setChartReady] = useState(false);
 
   const current = bars[idx];
   const visible = useMemo(() => bars.slice(0, idx + 1), [bars, idx]);
@@ -66,58 +58,6 @@ function App() {
   }
 
   useEffect(() => { loadLessons(); loadSession('news'); }, []);
-
-  useEffect(() => {
-    if (!chartEl.current || chartRef.current) return;
-    let cancelled = false;
-    let retryId = null;
-    let removeResizeListener = () => {};
-
-    function init() {
-      if (cancelled) return;
-      const chart = createChart(chartEl.current, {
-        layout: { background: { color: '#080b12' }, textColor: '#d1d5db' },
-        grid: { vertLines: { color: '#111827' }, horzLines: { color: '#111827' } },
-        rightPriceScale: { borderColor: '#1f2937' },
-        timeScale: { borderColor: '#1f2937', timeVisible: true, secondsVisible: false },
-        height: 480,
-      });
-      chartRef.current = chart;
-      candleSeries.current = chart.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444' });
-      ema8Series.current = chart.addLineSeries({ color: '#60a5fa', lineWidth: 1 });
-      ema21Series.current = chart.addLineSeries({ color: '#a78bfa', lineWidth: 1 });
-      vwapSeries.current = chart.addLineSeries({ color: '#f59e0b', lineWidth: 2 });
-      const resize = () => {
-        if (!chartEl.current) return;
-        const rect = chartEl.current.getBoundingClientRect();
-        chart.applyOptions({ width: Math.max(320, Math.floor(rect.width)), height: 480 });
-      };
-      resize();
-      window.addEventListener('resize', resize);
-      removeResizeListener = () => window.removeEventListener('resize', resize);
-      setChartReady(true);
-    }
-
-    init();
-    return () => {
-      cancelled = true;
-      if (retryId) clearTimeout(retryId);
-      removeResizeListener();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!candleSeries.current || !visible.length) return;
-    candleSeries.current.setData(visible.map(b => ({ time: chartTime(b.time), open: b.open, high: b.high, low: b.low, close: b.close })));
-    ema8Series.current.setData(visible.map(b => ({ time: chartTime(b.time), value: b.ema8 })));
-    ema21Series.current.setData(visible.map(b => ({ time: chartTime(b.time), value: b.ema21 })));
-    vwapSeries.current.setData(visible.map(b => ({ time: chartTime(b.time), value: b.vwap })));
-    const markers = [];
-    if (trade?.entryIndex <= idx) markers.push({ time: chartTime(bars[trade.entryIndex].time), position: trade.direction === 'long' ? 'belowBar' : 'aboveBar', color: '#22c55e', shape: trade.direction === 'long' ? 'arrowUp' : 'arrowDown', text: `${trade.direction.toUpperCase()} ENTRY` });
-    if (trade?.exitIndex <= idx) markers.push({ time: chartTime(bars[trade.exitIndex].time), position: trade.direction === 'long' ? 'aboveBar' : 'belowBar', color: '#f97316', shape: 'circle', text: 'EXIT' });
-    candleSeries.current.setMarkers(markers);
-    chartRef.current.timeScale().fitContent();
-  }, [visible, trade, idx, bars, chartReady]);
 
   useEffect(() => {
     if (!playing) return;
@@ -197,7 +137,7 @@ function App() {
             <button className="exit" disabled={!trade || !!trade.exitIndex || idx === trade.entryIndex} onClick={exitTrade}>Exit / Score</button>
             <button onClick={() => askCoach()}>Coach This Candle</button>
           </div>
-          <div ref={chartEl} className="chart" />
+          <SvgChart bars={visible} trade={trade} idx={idx} />
           <div className="legend"><span className="ema8">EMA8</span><span className="ema21">EMA21</span><span className="vwap">VWAP</span><span>Training only — no orders are placed.</span></div>
         </section>
 
@@ -210,6 +150,67 @@ function App() {
         </aside>
       </main>
     </>}
+  </div>;
+}
+
+function SvgChart({ bars, trade, idx }) {
+  if (!bars || bars.length < 2) {
+    return <div className="chart fallbackChart"><p>Waiting for chart data…</p></div>;
+  }
+
+  const width = 1120;
+  const height = 480;
+  const pad = { top: 20, right: 62, bottom: 36, left: 14 };
+  const plotW = width - pad.left - pad.right;
+  const plotH = height - pad.top - pad.bottom;
+  const prices = [];
+  bars.forEach(b => {
+    prices.push(b.high, b.low, b.ema8, b.ema21, b.vwap);
+  });
+  let min = Math.min(...prices);
+  let max = Math.max(...prices);
+  const range = Math.max(max - min, 1);
+  min -= range * 0.08;
+  max += range * 0.08;
+  const y = price => pad.top + ((max - price) / (max - min)) * plotH;
+  const x = i => pad.left + (i / Math.max(bars.length - 1, 1)) * plotW;
+  const candleW = Math.max(3, Math.min(10, plotW / bars.length * 0.55));
+  const linePath = key => bars.map((b, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(b[key]).toFixed(1)}`).join(' ');
+  const grid = Array.from({ length: 5 }, (_, i) => min + ((max - min) * i / 4));
+
+  const entryIndex = trade?.entryIndex;
+  const exitIndex = trade?.exitIndex;
+
+  return <div className="chart svgChartWrap">
+    <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label="SPX 0DTE training candlestick chart">
+      <rect x="0" y="0" width={width} height={height} fill="#080b12" />
+      {grid.map((g, i) => <g key={i}>
+        <line x1={pad.left} x2={width - pad.right} y1={y(g)} y2={y(g)} stroke="#172033" strokeWidth="1" />
+        <text x={width - pad.right + 8} y={y(g) + 4} fill="#94a3b8" fontSize="12">{g.toFixed(1)}</text>
+      </g>)}
+      <path d={linePath('ema8')} fill="none" stroke="#60a5fa" strokeWidth="2" opacity="0.9" />
+      <path d={linePath('ema21')} fill="none" stroke="#a78bfa" strokeWidth="2" opacity="0.85" />
+      <path d={linePath('vwap')} fill="none" stroke="#f59e0b" strokeWidth="2.5" opacity="0.95" />
+      {bars.map((b, i) => {
+        const up = b.close >= b.open;
+        const color = up ? '#22c55e' : '#ef4444';
+        const bodyTop = Math.min(y(b.open), y(b.close));
+        const bodyH = Math.max(Math.abs(y(b.open) - y(b.close)), 2);
+        return <g key={i}>
+          <line x1={x(i)} x2={x(i)} y1={y(b.high)} y2={y(b.low)} stroke={color} strokeWidth="1.4" />
+          <rect x={x(i) - candleW / 2} y={bodyTop} width={candleW} height={bodyH} fill={color} rx="1" />
+        </g>;
+      })}
+      {entryIndex !== undefined && entryIndex <= idx && bars[entryIndex] && <g>
+        <line x1={x(entryIndex)} x2={x(entryIndex)} y1={pad.top} y2={height - pad.bottom} stroke="#22c55e" strokeDasharray="5 5" strokeWidth="2" />
+        <text x={x(entryIndex) + 6} y={pad.top + 18} fill="#22c55e" fontSize="13" fontWeight="800">ENTRY</text>
+      </g>}
+      {exitIndex !== undefined && exitIndex <= idx && bars[exitIndex] && <g>
+        <line x1={x(exitIndex)} x2={x(exitIndex)} y1={pad.top} y2={height - pad.bottom} stroke="#f97316" strokeDasharray="5 5" strokeWidth="2" />
+        <text x={x(exitIndex) + 6} y={pad.top + 36} fill="#f97316" fontSize="13" fontWeight="800">EXIT</text>
+      </g>}
+      <text x={pad.left} y={height - 12} fill="#94a3b8" fontSize="12">Synthetic SPX replay candles · chart rendered locally with SVG</text>
+    </svg>
   </div>;
 }
 
